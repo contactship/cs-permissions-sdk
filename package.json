@@ -1,0 +1,31 @@
+{
+  "name": "@briansleonel/cs-permissions-sdk",
+  "version": "1.0.8",
+  "description": "Guards, decorators and interfaces for NestJS role-based permissions",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepublishOnly": "npm run build"
+  },
+  "peerDependencies": {
+    "@nestjs/common": "^10.0.0 || ^11.0.0",
+    "@nestjs/core": "^10.0.0 || ^11.0.0",
+    "@nestjs/jwt": "^10.0.0 || ^11.0.0"
+  },
+  "devDependencies": {
+    "@nestjs/common": "^11.0.0",
+    "@nestjs/core": "^11.0.0",
+    "@nestjs/jwt": "^11.0.0",
+    "@types/express": "^5.0.6",
+    "@types/lodash": "^4.17.0",
+    "@types/node": "^20.19.37",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "lodash": "^4.17.21"
+  }
+}

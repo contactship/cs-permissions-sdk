@@ -18,4 +18,5 @@ export enum RoleFeatureEnum {
   INTEGRATIONS = "integrations",
   QUICK_REPLIES = "quick-replies",
   REPORTS = "reports",
+  CONTACT_BOARD = "contact_board",
 }

@@ -33,7 +33,7 @@ export class CsPermissionsSdkModule {
         OrganizationRoleGuard,
         PermissionGuard,
       ],
-      exports: [OrganizationRoleGuard, PermissionGuard],
+      exports: [OrganizationRoleGuard, PermissionGuard, JwtModule],
     };
   }
 
@@ -60,6 +60,7 @@ export class CsPermissionsSdkModule {
         OrganizationRoleGuard,
         PermissionGuard,
         PERMISSION_JWT_SECRET_TOKEN,
+        JwtModule,
       ],
     };
   }

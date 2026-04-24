@@ -13,7 +13,7 @@ export enum RoleFeatureEnum {
   BILLING = "billing",
   TAGS = "tags",
   TASKS = "tasks",
-  THREADS = "threads",
+  THREAD = "thread",
   CHANNELS = "channels",
   INTEGRATIONS = "integrations",
   QUICK_REPLIES = "quick-replies",

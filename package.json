@@ -1,6 +1,6 @@
 {
   "name": "@briansleonel/cs-permissions-sdk",
-  "version": "1.0.10",
+  "version": "1.0.11",
   "description": "Guards, decorators and interfaces for NestJS role-based permissions",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

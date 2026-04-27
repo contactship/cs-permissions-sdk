@@ -28,7 +28,7 @@ export class GatewayPermissionsClient {
   ) {}
 
   async fetchToken(organizationId: string, userId: string): Promise<string> {
-    const url = `${this.gatewayUrl.replace(/\/$/, "")}/internal/permissions-token`;
+    const url = `${this.gatewayUrl.replace(/\/$/, "")}/api/auth/internal/permissions-token`;
     const body: IFetchTokenRequest = {
       organization_id: organizationId,
       user_id: userId,

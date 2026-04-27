@@ -14,9 +14,11 @@ interface IFetchTokenRequest {
   user_id: string;
 }
 
-interface IFetchTokenResponse {
-  token: string;
+interface ITokenBody {
+  token?: string;
 }
+
+type FetchTokenResponse = ITokenBody & { data?: ITokenBody };
 
 @Injectable()
 export class GatewayPermissionsClient {
@@ -36,14 +38,16 @@ export class GatewayPermissionsClient {
 
     try {
       const { data } = await firstValueFrom(
-        this.httpService.post<IFetchTokenResponse>(url, body),
+        this.httpService.post<FetchTokenResponse>(url, body),
       );
 
-      if (!data?.token) {
+      const token = data?.token ?? data?.data?.token;
+
+      if (!token) {
         throw new Error("Gateway returned an empty permissions token");
       }
 
-      return data.token;
+      return token;
     } catch (err) {
       if (err instanceof AxiosError) {
         const status = err.response?.status ?? "NO_STATUS";

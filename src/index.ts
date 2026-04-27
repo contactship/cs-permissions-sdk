@@ -1,7 +1,9 @@
 export * from "./enums/actions.enum";
 export * from "./enums/features.enum";
 export * from "./enums/scope.enum";
+export * from "./constants/org-id-header.constant";
 export * from "./constants/org-token-header.constant";
+export * from "./constants/sdk-tokens.constant";
 export * from "./interfaces/permission.interface";
 export * from "./interfaces/permissions-payload.interface";
 export * from "./interfaces/required-permission.interface";
@@ -15,4 +17,6 @@ export * from "./decorators/require-permission.decorator";
 export * from "./decorators/active-user.decorator";
 export * from "./guards/organization-role.guard";
 export * from "./guards/permission.guard";
+export * from "./services/gateway-permissions.client";
+export * from "./services/organization-token.service";
 export * from "./cs-permissions-sdk.module";

@@ -1,67 +1,134 @@
-import { DynamicModule, Global, Module } from "@nestjs/common";
+import { RedisModule } from "@nestjs-modules/ioredis";
+import { HttpModule } from "@nestjs/axios";
+import { DynamicModule, Global, Module, Provider } from "@nestjs/common";
 import { JwtModule } from "@nestjs/jwt";
 import {
-  OrganizationRoleGuard,
+  CS_PERMISSIONS_SDK_OPTIONS,
+  PERMISSION_GATEWAY_URL_TOKEN,
   PERMISSION_JWT_SECRET_TOKEN,
-} from "./guards/organization-role.guard";
+} from "./constants/sdk-tokens.constant";
+import { OrganizationRoleGuard } from "./guards/organization-role.guard";
 import { PermissionGuard } from "./guards/permission.guard";
+import { GatewayPermissionsClient } from "./services/gateway-permissions.client";
+import { OrganizationTokenService } from "./services/organization-token.service";
 
 export interface CsPermissionsSdkOptions {
   jwtSecret: string;
+  redisUrl: string;
+  gatewayUrl: string;
 }
 
 export interface CsPermissionsSdkAsyncOptions {
   useFactory: (
-    ...args: any[]
+    ...args: unknown[]
   ) => Promise<CsPermissionsSdkOptions> | CsPermissionsSdkOptions;
-  inject?: any[];
-  imports?: any[];
+  inject?: unknown[];
+  imports?: unknown[];
 }
 
 @Global()
 @Module({})
 export class CsPermissionsSdkModule {
   static forRoot(options: CsPermissionsSdkOptions): DynamicModule {
-    return {
-      module: CsPermissionsSdkModule,
-      imports: [JwtModule.register({})],
-      providers: [
-        {
-          provide: PERMISSION_JWT_SECRET_TOKEN,
-          useValue: options.jwtSecret,
-        },
-        OrganizationRoleGuard,
-        PermissionGuard,
-      ],
-      exports: [OrganizationRoleGuard, PermissionGuard, JwtModule],
+    const optionsProvider: Provider = {
+      provide: CS_PERMISSIONS_SDK_OPTIONS,
+      useValue: options,
     };
-  }
 
-  static forRootAsync(
-    asyncOptions: CsPermissionsSdkAsyncOptions,
-  ): DynamicModule {
     return {
       module: CsPermissionsSdkModule,
       global: true,
-      imports: [JwtModule.register({}), ...(asyncOptions.imports || [])],
+      imports: [
+        JwtModule.register({}),
+        HttpModule.register({}),
+        RedisModule.forRoot({
+          type: "single",
+          url: options.redisUrl,
+        }),
+      ],
       providers: [
-        {
-          provide: PERMISSION_JWT_SECRET_TOKEN,
-          useFactory: async (...args: any[]) => {
-            const options = await asyncOptions.useFactory(...args);
-            return options.jwtSecret;
-          },
-          inject: asyncOptions.inject || [],
-        },
+        optionsProvider,
+        ...this.buildDerivedProviders(),
+        GatewayPermissionsClient,
+        OrganizationTokenService,
         OrganizationRoleGuard,
         PermissionGuard,
       ],
       exports: [
         OrganizationRoleGuard,
         PermissionGuard,
+        OrganizationTokenService,
+        GatewayPermissionsClient,
         PERMISSION_JWT_SECRET_TOKEN,
+        PERMISSION_GATEWAY_URL_TOKEN,
         JwtModule,
       ],
     };
+  }
+
+  static forRootAsync(
+    asyncOptions: CsPermissionsSdkAsyncOptions,
+  ): DynamicModule {
+    const inject = (asyncOptions.inject ?? []) as Provider[];
+    const extraImports = (asyncOptions.imports ?? []) as DynamicModule[];
+
+    const optionsProvider: Provider = {
+      provide: CS_PERMISSIONS_SDK_OPTIONS,
+      useFactory: asyncOptions.useFactory,
+      inject: asyncOptions.inject as never[],
+    };
+
+    return {
+      module: CsPermissionsSdkModule,
+      global: true,
+      imports: [
+        JwtModule.register({}),
+        HttpModule.register({}),
+        RedisModule.forRootAsync({
+          inject,
+          imports: extraImports,
+          useFactory: async (...args: unknown[]) => {
+            const opts = await asyncOptions.useFactory(...args);
+            return {
+              type: "single",
+              url: opts.redisUrl,
+            };
+          },
+        }),
+        ...extraImports,
+      ],
+      providers: [
+        optionsProvider,
+        ...this.buildDerivedProviders(),
+        GatewayPermissionsClient,
+        OrganizationTokenService,
+        OrganizationRoleGuard,
+        PermissionGuard,
+      ],
+      exports: [
+        OrganizationRoleGuard,
+        PermissionGuard,
+        OrganizationTokenService,
+        GatewayPermissionsClient,
+        PERMISSION_JWT_SECRET_TOKEN,
+        PERMISSION_GATEWAY_URL_TOKEN,
+        JwtModule,
+      ],
+    };
+  }
+
+  private static buildDerivedProviders(): Provider[] {
+    return [
+      {
+        provide: PERMISSION_JWT_SECRET_TOKEN,
+        useFactory: (opts: CsPermissionsSdkOptions) => opts.jwtSecret,
+        inject: [CS_PERMISSIONS_SDK_OPTIONS],
+      },
+      {
+        provide: PERMISSION_GATEWAY_URL_TOKEN,
+        useFactory: (opts: CsPermissionsSdkOptions) => opts.gatewayUrl,
+        inject: [CS_PERMISSIONS_SDK_OPTIONS],
+      },
+    ];
   }
 }

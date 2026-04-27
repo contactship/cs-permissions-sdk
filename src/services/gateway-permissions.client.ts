@@ -45,13 +45,21 @@ export class GatewayPermissionsClient {
 
       return data.token;
     } catch (err) {
-      const message =
-        err instanceof AxiosError
-          ? `${err.response?.status ?? "NO_STATUS"} ${err.message}`
-          : (err as Error).message;
-      this.logger.error(
-        `Failed to fetch permissions token for org=${organizationId} user=${userId}: ${message}`,
-      );
+      if (err instanceof AxiosError) {
+        const status = err.response?.status ?? "NO_STATUS";
+        const responseBody = err.response?.data
+          ? JSON.stringify(err.response.data)
+          : "<no body>";
+        this.logger.error(
+          `Failed to fetch permissions token for org=${organizationId} user=${userId}. ` +
+            `URL=${url} status=${status} message="${err.message}" response=${responseBody}`,
+        );
+      } else {
+        this.logger.error(
+          `Failed to fetch permissions token for org=${organizationId} user=${userId}. ` +
+            `URL=${url} message="${(err as Error).message}"`,
+        );
+      }
       throw new ServiceUnavailableException(
         "Failed to fetch permissions token from gateway",
       );

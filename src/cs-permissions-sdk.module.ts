@@ -20,10 +20,10 @@ export interface CsPermissionsSdkOptions {
 
 export interface CsPermissionsSdkAsyncOptions {
   useFactory: (
-    ...args: unknown[]
+    ...args: any[]
   ) => Promise<CsPermissionsSdkOptions> | CsPermissionsSdkOptions;
-  inject?: unknown[];
-  imports?: unknown[];
+  inject?: any[];
+  imports?: any[];
 }
 
 @Global()
@@ -69,13 +69,13 @@ export class CsPermissionsSdkModule {
   static forRootAsync(
     asyncOptions: CsPermissionsSdkAsyncOptions,
   ): DynamicModule {
-    const inject = (asyncOptions.inject ?? []) as Provider[];
-    const extraImports = (asyncOptions.imports ?? []) as DynamicModule[];
+    const inject = asyncOptions.inject ?? [];
+    const extraImports = asyncOptions.imports ?? [];
 
     const optionsProvider: Provider = {
       provide: CS_PERMISSIONS_SDK_OPTIONS,
       useFactory: asyncOptions.useFactory,
-      inject: asyncOptions.inject as never[],
+      inject,
     };
 
     return {
@@ -87,7 +87,7 @@ export class CsPermissionsSdkModule {
         RedisModule.forRootAsync({
           inject,
           imports: extraImports,
-          useFactory: async (...args: unknown[]) => {
+          useFactory: async (...args: any[]) => {
             const opts = await asyncOptions.useFactory(...args);
             return {
               type: "single",

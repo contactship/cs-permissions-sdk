@@ -10,12 +10,17 @@ import {
 import { OrganizationRoleGuard } from "./guards/organization-role.guard";
 import { PermissionGuard } from "./guards/permission.guard";
 import { GatewayPermissionsClient } from "./services/gateway-permissions.client";
-import { OrganizationTokenService } from "./services/organization-token.service";
+import { OrganizationPermissionsService } from "./services/organization-permissions.service";
 
 export interface CsPermissionsSdkOptions {
-  jwtSecret: string;
   redisUrl: string;
   gatewayUrl: string;
+  /**
+   * @deprecated No longer used by the SDK after v1.1.0. Permissions are now
+   * resolved from a granular Redis cache instead of a JWT. The option is kept
+   * for backwards compatibility — passing it is harmless and ignored.
+   */
+  jwtSecret?: string;
 }
 
 export interface CsPermissionsSdkAsyncOptions {
@@ -50,14 +55,14 @@ export class CsPermissionsSdkModule {
         optionsProvider,
         ...this.buildDerivedProviders(),
         GatewayPermissionsClient,
-        OrganizationTokenService,
+        OrganizationPermissionsService,
         OrganizationRoleGuard,
         PermissionGuard,
       ],
       exports: [
         OrganizationRoleGuard,
         PermissionGuard,
-        OrganizationTokenService,
+        OrganizationPermissionsService,
         GatewayPermissionsClient,
         PERMISSION_JWT_SECRET_TOKEN,
         PERMISSION_GATEWAY_URL_TOKEN,
@@ -101,14 +106,14 @@ export class CsPermissionsSdkModule {
         optionsProvider,
         ...this.buildDerivedProviders(),
         GatewayPermissionsClient,
-        OrganizationTokenService,
+        OrganizationPermissionsService,
         OrganizationRoleGuard,
         PermissionGuard,
       ],
       exports: [
         OrganizationRoleGuard,
         PermissionGuard,
-        OrganizationTokenService,
+        OrganizationPermissionsService,
         GatewayPermissionsClient,
         PERMISSION_JWT_SECRET_TOKEN,
         PERMISSION_GATEWAY_URL_TOKEN,
@@ -121,7 +126,7 @@ export class CsPermissionsSdkModule {
     return [
       {
         provide: PERMISSION_JWT_SECRET_TOKEN,
-        useFactory: (opts: CsPermissionsSdkOptions) => opts.jwtSecret,
+        useFactory: (opts: CsPermissionsSdkOptions) => opts.jwtSecret ?? "",
         inject: [CS_PERMISSIONS_SDK_OPTIONS],
       },
       {

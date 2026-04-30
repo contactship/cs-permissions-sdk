@@ -6,18 +6,15 @@ import {
   UnauthorizedException,
 } from "@nestjs/common";
 import { ORG_ID_HEADER } from "../constants/org-id-header.constant";
-import { PERMISSION_JWT_SECRET_TOKEN } from "../constants/sdk-tokens.constant";
 import { IRequestWithUser } from "../interfaces/request-user.interface";
-import { OrganizationTokenService } from "../services/organization-token.service";
-
-export { PERMISSION_JWT_SECRET_TOKEN };
+import { OrganizationPermissionsService } from "../services/organization-permissions.service";
 
 @Injectable()
 export class OrganizationRoleGuard implements CanActivate {
   private readonly logger = new Logger(OrganizationRoleGuard.name);
 
   constructor(
-    private readonly organizationTokenService: OrganizationTokenService,
+    private readonly organizationPermissionsService: OrganizationPermissionsService,
   ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
@@ -37,17 +34,18 @@ export class OrganizationRoleGuard implements CanActivate {
     }
 
     try {
-      const payload = await this.organizationTokenService.getOrRequestToken(
-        organizationId,
-        user.id,
-      );
+      const payload =
+        await this.organizationPermissionsService.resolvePermissions(
+          organizationId,
+          user.id,
+        );
 
       if (
         payload.user_id !== user.id ||
         payload.organization_id !== organizationId
       ) {
         throw new UnauthorizedException(
-          "Permissions token does not match request context",
+          "Resolved permissions do not match request context",
         );
       }
 
@@ -62,7 +60,9 @@ export class OrganizationRoleGuard implements CanActivate {
       this.logger.error(
         `Failed to authorize org=${organizationId} user=${user.id}: ${(err as Error).message}`,
       );
-      throw new UnauthorizedException("Could not authorize organization access");
+      throw new UnauthorizedException(
+        "Could not authorize organization access",
+      );
     }
   }
 }

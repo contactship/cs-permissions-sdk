@@ -1,6 +1,6 @@
 # @briansleonel/cs-permissions-sdk
 
-NestJS SDK that centralizes **organization-scoped role-based access control (RBAC)** for a microservices ecosystem. It transparently handles JWT signing, Redis caching, and remote permission resolution against a central gateway, exposing a simple guard + decorator API to the consuming service.
+NestJS SDK that centralizes **organization-scoped role-based access control (RBAC)** for a microservices ecosystem. It transparently handles Redis caching and remote permission resolution against a central gateway, exposing a simple guard + decorator API to the consuming service.
 
 The consuming service never queries the auth/role database directly. It only:
 1. Sends the `x-organization-id` header.
@@ -19,7 +19,9 @@ The consuming service never queries the auth/role database directly. It only:
 - [Public API](#public-api)
 - [Internal services](#internal-services)
 - [Caching strategy](#caching-strategy)
+- [Cache invalidation](#cache-invalidation)
 - [Injection tokens](#injection-tokens)
+- [Migration from 1.0.x](#migration-from-10x)
 - [Troubleshooting](#troubleshooting)
 
 ---
@@ -27,44 +29,52 @@ The consuming service never queries the auth/role database directly. It only:
 ## Architecture
 
 ```
-┌────────────┐  x-organization-id   ┌─────────────────────────────────────────┐
-│  Frontend  │ ───────────────────► │  Microservice (consumer)                │
-└────────────┘                      │                                         │
-                                    │   ┌─────────────────────────────────┐   │
-                                    │   │ UserFromGatewayMiddleware       │   │  ← injects request.user
-                                    │   └─────────────────────────────────┘   │
-                                    │                  │                      │
-                                    │                  ▼                      │
-                                    │   ┌─────────────────────────────────┐   │
-                                    │   │ OrganizationRoleGuard (SDK)     │   │
-                                    │   │  └─► OrganizationTokenService   │   │
-                                    │   │        ├─► Redis  GET key       │   │
-                                    │   │        ├─► HTTP   POST gateway  │───┼──► Gateway
-                                    │   │        └─► JWT    verify+decode │   │       /internal/permissions-token
-                                    │   └─────────────────────────────────┘   │
-                                    │                  │                      │
-                                    │                  ▼                      │
-                                    │   ┌─────────────────────────────────┐   │
-                                    │   │ PermissionGuard (SDK)           │   │
-                                    │   │   reads request.org_user_       │   │
-                                    │   │   permissions and matches       │   │
-                                    │   │   @RequirePermission metadata   │   │
-                                    │   └─────────────────────────────────┘   │
-                                    │                  │                      │
-                                    │                  ▼                      │
-                                    │              Controller                 │
-                                    └─────────────────────────────────────────┘
+┌────────────┐  x-organization-id   ┌──────────────────────────────────────────────┐
+│  Frontend  │ ───────────────────► │  Microservice (consumer)                     │
+└────────────┘                      │                                              │
+                                    │  ┌─────────────────────────────────────┐     │
+                                    │  │ UserFromGatewayMiddleware           │     │
+                                    │  └─────────────────────────────────────┘     │
+                                    │                  │                           │
+                                    │                  ▼                           │
+                                    │  ┌─────────────────────────────────────┐     │
+                                    │  │ OrganizationRoleGuard (SDK)         │     │
+                                    │  │  └─► OrganizationPermissionsService │     │
+                                    │  │        │                            │     │
+                                    │  │        ├─► Redis GET                │     │
+                                    │  │        │   org-roles:{org}:user:{u} │     │
+                                    │  │        │   (TTL 1h)                 │     │
+                                    │  │        │   miss → POST gateway      │─────┼──► /api/roles/internal/user-role
+                                    │  │        │                            │     │
+                                    │  │        └─► Redis GET                │     │
+                                    │  │            role:{roleId}:permissions│     │
+                                    │  │            (TTL 24h)                │     │
+                                    │  │            miss → GET gateway       │─────┼──► /api/roles/internal/permissions/:roleId
+                                    │  └─────────────────────────────────────┘     │
+                                    │                  │                           │
+                                    │                  ▼                           │
+                                    │  ┌─────────────────────────────────────┐     │
+                                    │  │ PermissionGuard (SDK)               │     │
+                                    │  │   reads request.org_user_permissions│     │
+                                    │  │   matches @RequirePermission metas  │     │
+                                    │  └─────────────────────────────────────┘     │
+                                    │                  │                           │
+                                    │                  ▼                           │
+                                    │             Controller                       │
+                                    └──────────────────────────────────────────────┘
 ```
 
 **Responsibilities**
 
 | Layer | Owns |
 |---|---|
-| Gateway (external) | Database access, role/permission computation, JWT signing |
-| SDK | Cache, JWT verification, header parsing, request enrichment, permission matching |
+| Gateway (external) | Database access, role/permission computation, cache invalidation on mutations |
+| SDK | Two-tier Redis cache, header parsing, request enrichment, permission matching |
 | Consumer service | Business logic, controllers, declaring required permissions |
 
-The SDK **never** touches the auth/roles database. All token issuance is delegated to the gateway over HTTP, and results are cached in Redis to avoid hitting the gateway on every request.
+The SDK **never** touches the auth/roles database. All resolution is delegated to the gateway over HTTP, and results are cached in Redis to avoid hitting the gateway on every request.
+
+> **Why two cache keys instead of a single JWT?** Granular invalidation. When a role's permissions change, the gateway just `DEL`s `role:{roleId}:permissions` and **all users with that role** see the change immediately on their next request — no per-user token reissue, no JWT decode cost on every request.
 
 ---
 
@@ -80,7 +90,7 @@ The SDK declares the following peer dependencies — your service must install t
 
 ```bash
 npm install \
-  @nestjs/common @nestjs/core @nestjs/jwt \
+  @nestjs/common @nestjs/core \
   @nestjs/axios axios rxjs \
   @nestjs-modules/ioredis ioredis
 ```
@@ -88,9 +98,9 @@ npm install \
 | Package | Why |
 |---|---|
 | `@nestjs/common`, `@nestjs/core` | NestJS runtime |
-| `@nestjs/jwt` | JWT verification (verify-only — signing happens at the gateway) |
 | `@nestjs/axios`, `axios`, `rxjs` | HTTP client used by `GatewayPermissionsClient` |
-| `@nestjs-modules/ioredis`, `ioredis` | Redis client for the token cache |
+| `@nestjs-modules/ioredis`, `ioredis` | Redis client for the permissions cache |
+| `@nestjs/jwt` | _Optional_ — only needed if your service uses the deprecated `jwtSecret` option, otherwise you can skip it |
 
 ---
 
@@ -102,9 +112,9 @@ The SDK is registered **once** in your `AppModule` via `forRoot` or `forRootAsyn
 
 ```typescript
 interface CsPermissionsSdkOptions {
-  jwtSecret: string;   // shared secret used to verify tokens issued by the gateway
   redisUrl: string;    // ioredis connection string, e.g. redis://localhost:6379
   gatewayUrl: string;  // base URL of the gateway service (no trailing slash needed)
+  jwtSecret?: string;  // @deprecated — kept for backwards compatibility, no longer used
 }
 ```
 
@@ -121,8 +131,7 @@ import { CsPermissionsSdkModule } from '@briansleonel/cs-permissions-sdk';
     CsPermissionsSdkModule.forRootAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({
-        jwtSecret: config.get<string>('JWT_SECRET_API_KEY') ?? '',
-        redisUrl:  config.get<string>('REDIS_URL') ?? '',
+        redisUrl:   config.get<string>('REDIS_URL') ?? '',
         gatewayUrl: config.get<string>('GATEWAY_URL') ?? '',
       }),
     }),
@@ -135,7 +144,6 @@ export class AppModule {}
 
 ```typescript
 CsPermissionsSdkModule.forRoot({
-  jwtSecret:  'super-secret',
   redisUrl:   'redis://localhost:6379',
   gatewayUrl: 'https://gateway.internal',
 }),
@@ -145,8 +153,7 @@ CsPermissionsSdkModule.forRoot({
 
 | Var | Example | Purpose |
 |---|---|---|
-| `JWT_SECRET_API_KEY` | `change-me` | Must match the secret the gateway uses to sign permissions tokens |
-| `REDIS_URL` | `redis://localhost:6379` | Redis instance used for the token cache |
+| `REDIS_URL` | `redis://localhost:6379` | Redis instance used for the permissions cache |
 | `GATEWAY_URL` | `https://gateway.internal` | Base URL of the gateway HTTP service |
 
 ---
@@ -163,13 +170,15 @@ A middleware running **before** the SDK guards must populate `request.user` with
 request.user = { id: string, /* ...rest of your user shape */ };
 ```
 
-In the existing ecosystem this is `UserFromGatewayMiddleware`. The SDK uses `request.user.id` to ask the gateway for that user's permissions inside the requested organization.
+In the existing ecosystem this is `UserFromGatewayMiddleware`. The SDK uses `request.user.id` to ask the gateway for that user's role inside the requested organization.
 
-### 2. Gateway endpoint (the central service)
+### 2. Gateway endpoints (the central service)
 
-The SDK calls the gateway with this contract:
+The SDK calls **two** endpoints on the gateway:
 
-**`POST {gatewayUrl}/internal/permissions-token`**
+#### `POST {gatewayUrl}/api/roles/internal/user-role`
+
+Returns the user's role inside the organization.
 
 Request body:
 ```json
@@ -179,30 +188,50 @@ Request body:
 }
 ```
 
-Response body:
+Response body (either shape is supported — the SDK auto-unwraps `{ data: ... }`):
 ```json
-{ "token": "eyJhbGciOi..." }
-```
-
-The `token` must be a JWT signed with the same `jwtSecret` configured in the SDK, and its decoded payload must conform to [`IRolePayload`](#irolepayload):
-
-```typescript
 {
-  user_id: string;
-  organization_id: string;
-  role_id: string;
-  permissions: { feature: string; action: string; scope?: string[] | null }[];
+  "user_id": "uuid",
+  "organization_id": "uuid",
+  "role_id": "uuid"
 }
 ```
 
-A reference implementation on the gateway side (already in production):
-
-```typescript
-// gateway side
-const rolePayload = await retrieveRolePayloadAction.execute(userId, organizationId);
-const { token }   = await generateRolePermissionsTokenAction.execute(rolePayload);
-return { token };
+Or wrapped:
+```json
+{
+  "statusCode": 200,
+  "data": {
+    "user_id": "uuid",
+    "organization_id": "uuid",
+    "role_id": "uuid"
+  }
+}
 ```
+
+#### `GET {gatewayUrl}/api/roles/internal/permissions/:roleId`
+
+Returns the array of permissions for the given role.
+
+Response body:
+```json
+[
+  { "feature": "contacts", "action": "read",   "scope": null },
+  { "feature": "contacts", "action": "create", "scope": ["all"] }
+]
+```
+
+Or wrapped:
+```json
+{
+  "statusCode": 200,
+  "data": [
+    { "feature": "contacts", "action": "read", "scope": null }
+  ]
+}
+```
+
+The shape of each permission must conform to [`IPermissionPayload`](#ipermissionpayload).
 
 ---
 
@@ -262,7 +291,7 @@ whoami(@Req() req: IRequestWithUser) {
 
 #### `OrganizationRoleGuard`
 
-Reads the `x-organization-id` header and the authenticated `request.user.id`, then asks `OrganizationTokenService` for the role payload (cached in Redis or fetched from the gateway). On success it sets:
+Reads the `x-organization-id` header and the authenticated `request.user.id`, then asks `OrganizationPermissionsService` for the resolved role payload (cached in Redis or fetched from the gateway). On success it sets:
 
 - `request.org_user_permissions` → `IRolePayload`
 - `request.organization_id` → `string`
@@ -270,8 +299,8 @@ Reads the `x-organization-id` header and the authenticated `request.user.id`, th
 Throws `UnauthorizedException` if:
 - the header is missing,
 - `request.user` is missing,
-- the gateway is unreachable or returns an empty token,
-- the JWT signature fails or the payload doesn't match the request context.
+- the gateway is unreachable,
+- the resolved payload doesn't match the request context.
 
 #### `PermissionGuard`
 
@@ -340,7 +369,7 @@ me(@ActiveUser() user: IUserWithoutPassword) {
 
 #### `IRolePayload`
 
-The decoded JWT payload returned by the gateway and cached in Redis.
+The payload set on `request.org_user_permissions` after `OrganizationRoleGuard` runs.
 
 ```typescript
 interface IRolePayload {
@@ -348,6 +377,18 @@ interface IRolePayload {
   organization_id: string;
   role_id: string;
   permissions: IPermissionPayload[];
+}
+```
+
+#### `IUserRole`
+
+The cached membership record (returned by the user-role gateway endpoint).
+
+```typescript
+interface IUserRole {
+  user_id: string;
+  organization_id: string;
+  role_id: string;
 }
 ```
 
@@ -396,60 +437,116 @@ interface IRequestWithUser extends Request {
 
 ## Internal services
 
-These services are exported in case you need to use them outside the guards (for example in custom middleware, background jobs, or scripts). In day-to-day controller code you don't need them.
+These services are exported in case you need to use them outside the guards (custom middleware, background jobs, scripts). In day-to-day controller code you don't need them.
 
-### `OrganizationTokenService`
+### `OrganizationPermissionsService`
 
 ```typescript
-getOrRequestToken(organizationId: string, userId: string): Promise<IRolePayload>
+resolvePermissions(organizationId: string, userId: string): Promise<IRolePayload>
 ```
 
-Resolves the role payload using this strategy:
+Resolves the role payload by combining the two-tier cache:
 
-1. Lookup `permissions-token:{organizationId}:{userId}` in Redis.
-2. **Hit:** if the TTL is `≤ 5 minutes`, refresh by calling the gateway and overwrite the cache (TTL = 1h). Otherwise reuse the cached token. Either way, decode and return the payload.
-3. **Miss:** call the gateway, store the token in Redis with TTL = 1h, decode, return.
+1. `org-roles:{orgId}:user:{userId}` → fetched once per hour, contains `{ user_id, organization_id, role_id }`.
+2. `role:{roleId}:permissions` → fetched on demand, contains the array of permissions for that role.
+3. Combines both into an `IRolePayload` and returns it.
 
 ### `GatewayPermissionsClient`
 
 ```typescript
-fetchToken(organizationId: string, userId: string): Promise<string>
+fetchUserRole(organizationId: string, userId: string): Promise<IUserRole>
+fetchRolePermissions(roleId: string): Promise<IPermissionPayload[]>
 ```
 
-Performs `POST {gatewayUrl}/internal/permissions-token` with body `{ organization_id, user_id }` and returns the JWT string from `response.data.token`. Throws `ServiceUnavailableException` on failure.
+Performs the actual HTTP calls to the gateway. Auto-unwraps `{ statusCode, data }` response shapes. Throws `ServiceUnavailableException` on failure (the underlying URL, status, and response body are logged).
 
 ---
 
 ## Caching strategy
 
-| Property | Value |
-|---|---|
-| Redis key | `permissions-token:{organizationId}:{userId}` |
-| Stored value | The raw JWT string returned by the gateway |
-| TTL | `3600` seconds (1 hour) |
-| Refresh threshold | `300` seconds (5 minutes before expiry) |
+| Key | Value | TTL | Refreshed when |
+|---|---|---|---|
+| `org-roles:{orgId}:user:{userId}` | `IUserRole` JSON | 1 hour | Cache miss or gateway `DEL` |
+| `role:{roleId}:permissions` | `IPermissionPayload[]` JSON | 24 hours | Cache miss or gateway `DEL` |
 
-Implications:
-- Permission changes propagate to a logged-in user **after at most 1 hour**, or sooner if the cache is invalidated externally (the gateway can `DEL` the key when a role changes).
-- If your gateway updates a user's role and you need it to apply immediately, the gateway should `DEL permissions-token:{orgId}:{userId}` after the change.
+Properties of this design:
+
+- **No JWT verification on every request.** The previous design encoded `IRolePayload` as a JWT and re-verified the signature on every call. Now it's plain JSON in Redis — faster, simpler, no shared secret needed at runtime.
+- **Granular invalidation.** When a role's permissions change, the gateway invalidates one key (`role:{roleId}:permissions`) and **every user holding that role** sees the change on their next request.
+- **TTLs are a safety net.** The 1h on `org-roles:...` covers the case where a user's role is reassigned. The 24h on `role:...:permissions` covers the case where an explicit invalidation is missed.
+
+---
+
+## Cache invalidation
+
+The gateway is the source of truth, so it must `DEL` the affected keys whenever data changes. Recommended hooks:
+
+| Mutation on the gateway | Keys to delete |
+|---|---|
+| Permissions of a role change | `role:{roleId}:permissions` |
+| A role is deleted | `role:{roleId}:permissions` (and force re-fetch of all users using it) |
+| User is reassigned to a different role in an organization | `org-roles:{orgId}:user:{userId}` |
+| User is removed from an organization | `org-roles:{orgId}:user:{userId}` |
+| User is added to a new organization | _(no action needed — first request will populate)_ |
+
+```typescript
+// gateway side, after mutating role permissions
+await this.redisService.del(`role:${roleId}:permissions`);
+
+// after mutating user-organization membership
+await this.redisService.del(`org-roles:${organizationId}:user:${userId}`);
+```
 
 ---
 
 ## Injection tokens
 
-The SDK exports three injection tokens. **You typically don't need any of these** — they are public only so the DI graph remains debuggable and so advanced consumers can override providers if they really need to.
+The SDK exports three injection tokens. **You typically don't need any of these** — they are public so the DI graph is debuggable and so advanced consumers can override providers if needed.
 
 | Token | Resolves to | Notes |
 |---|---|---|
-| `CS_PERMISSIONS_SDK_OPTIONS` | `CsPermissionsSdkOptions` | The full options object as produced by your `useFactory`. Internal — used as the single source of truth for the other tokens. |
-| `PERMISSION_JWT_SECRET_TOKEN` | `string` | Derived from `options.jwtSecret`. |
+| `CS_PERMISSIONS_SDK_OPTIONS` | `CsPermissionsSdkOptions` | The full options object as produced by your `useFactory`. Single source of truth. |
 | `PERMISSION_GATEWAY_URL_TOKEN` | `string` | Derived from `options.gatewayUrl`. |
+| `PERMISSION_JWT_SECRET_TOKEN` | `string` | _Deprecated._ Resolves to `options.jwtSecret ?? ''`. Kept for backwards compatibility. |
 
 ### Why `CS_PERMISSIONS_SDK_OPTIONS` exists
 
-If `forRootAsync` registered every derived provider with its own copy of `useFactory`, NestJS would invoke that factory once per provider (3+ times). Centralizing the result in `CS_PERMISSIONS_SDK_OPTIONS` ensures the factory runs **once**, and the rest of the providers (jwt secret, gateway url, RedisModule) read from that single value.
+If `forRootAsync` registered every derived provider with its own copy of `useFactory`, NestJS would invoke that factory once per provider. Centralizing the result in `CS_PERMISSIONS_SDK_OPTIONS` ensures the factory runs **once**, and the rest of the providers read from that single value.
 
-You only need to interact with this token if you're extending the SDK with new providers that also need to read configuration.
+---
+
+## Migration from 1.0.x
+
+If you are upgrading from `1.0.x`, the change is a **drop-in upgrade** — no code changes required in your service. The SDK still:
+
+- Accepts `jwtSecret` in the options (it's now ignored).
+- Exports `JwtModule` and `PERMISSION_JWT_SECRET_TOKEN` (kept for back-compat).
+- Sets `request.org_user_permissions` with the same `IRolePayload` shape.
+
+What changed under the hood:
+
+- Permissions are now resolved from a **two-tier Redis cache** instead of a JWT cached in Redis.
+- The gateway now needs to expose two new internal endpoints:
+  - `POST /api/roles/internal/user-role`
+  - `GET /api/roles/internal/permissions/:roleId`
+- The previous `/api/auth/internal/permissions-token` endpoint is **no longer called** by the SDK. You can remove it from the gateway once all services are upgraded.
+
+You can safely drop `jwtSecret` from your `useFactory` whenever convenient:
+
+```typescript
+// before
+useFactory: (config) => ({
+  jwtSecret:  config.get('JWT_SECRET_API_KEY') ?? '',
+  redisUrl:   config.get('REDIS_URL') ?? '',
+  gatewayUrl: config.get('GATEWAY_URL') ?? '',
+}),
+
+// after
+useFactory: (config) => ({
+  redisUrl:   config.get('REDIS_URL') ?? '',
+  gatewayUrl: config.get('GATEWAY_URL') ?? '',
+}),
+```
 
 ---
 
@@ -459,23 +556,33 @@ You only need to interact with this token if you're extending the SDK with new p
 |---|---|
 | `UnauthorizedException: Missing organization id header` | Frontend didn't send `x-organization-id`. |
 | `UnauthorizedException: Authenticated user is missing` | Your auth/user middleware is not running before the guards, or didn't set `request.user.id`. |
-| `UnauthorizedException: Permissions token does not match request context` | The gateway returned a token for a different `user_id`/`organization_id`. Likely a bug in the gateway or a mismatch in `jwtSecret`. |
-| `ServiceUnavailableException: Failed to fetch permissions token from gateway` | Gateway is down, unreachable, returning non-2xx, or returning an empty `token` field. Check `GATEWAY_URL` and gateway logs. |
-| `JsonWebTokenError: invalid signature` | The `JWT_SECRET_API_KEY` in your service does not match the one used by the gateway to sign tokens. |
-| Permission changes don't take effect | Cached token still valid (≤1h TTL). The gateway should `DEL permissions-token:{orgId}:{userId}` after role updates to invalidate the cache. |
+| `UnauthorizedException: Resolved permissions do not match request context` | Gateway returned a `user_role` that doesn't match the requested `(orgId, userId)`. Likely a bug in the gateway. |
+| `ServiceUnavailableException: Failed to fetch user role from gateway` | Gateway is down, unreachable, returning non-2xx, or the user does not belong to the organization. Check `GATEWAY_URL` and gateway logs (the SDK logs URL, status, and response body). |
+| `ServiceUnavailableException: Failed to fetch role permissions from gateway` | Same as above, but for the permissions endpoint. Check that `roleId` is valid in the gateway. |
+| Permission changes don't take effect | Cache key was not invalidated. Verify the gateway `DEL`s `role:{roleId}:permissions` after mutations. |
+| Role reassignment doesn't take effect | Verify the gateway `DEL`s `org-roles:{orgId}:user:{userId}` after the change. Otherwise wait up to 1 hour for the TTL to expire. |
 | Redis errors at boot (`ECONNREFUSED`) | Wrong `REDIS_URL`, or Redis is not running. |
 
 ### Manual cache invalidation (gateway side)
 
 ```typescript
-await redis.del(`permissions-token:${organizationId}:${userId}`);
+// invalidate a role's permissions for everyone using it
+await redis.del(`role:${roleId}:permissions`);
+
+// invalidate a single user's role membership
+await redis.del(`org-roles:${organizationId}:user:${userId}`);
 ```
 
 ---
 
 ## Versioning
 
-The SDK follows SemVer. Breaking changes to the public API (guards, decorators, exported interfaces, configuration shape) bump the major version. Internal changes (cache strategy tuning, logger output, token name fixes) ship in minor/patch.
+The SDK follows SemVer. Breaking changes to the public API (guards, decorators, exported interfaces, configuration shape) bump the major version. Internal changes (cache strategy tuning, logger output, new endpoints) ship in minor/patch.
+
+| Version | Notes |
+|---|---|
+| `1.1.x` | Two-tier Redis cache (`org-roles:*` + `role:*:permissions`). `jwtSecret` deprecated. |
+| `1.0.x` | JWT-based cache. Required `jwtSecret`. Single gateway endpoint `/api/auth/internal/permissions-token`. |
 
 ---
 

@@ -16,6 +16,11 @@ interface IFetchUserRoleRequest {
   user_id: string;
 }
 
+interface IFetchRolePermissionsResponse {
+  role_id: string;
+  permissions: IPermissionPayload[];
+}
+
 type MaybeWrapped<T> = T | { data: T };
 
 @Injectable()
@@ -66,15 +71,15 @@ export class GatewayPermissionsClient {
 
     try {
       const response = await firstValueFrom(
-        this.httpService.post<MaybeWrapped<IPermissionPayload[]>>(url),
+        this.httpService.post<MaybeWrapped<IFetchRolePermissionsResponse>>(url),
       );
-      const permissions = this.unwrap<IPermissionPayload[]>(response.data);
+      const payload = this.unwrap<IFetchRolePermissionsResponse>(response.data);
 
-      if (!Array.isArray(permissions)) {
+      if (!Array.isArray(payload?.permissions)) {
         throw new Error("Gateway returned a non-array permissions payload");
       }
 
-      return permissions;
+      return payload.permissions;
     } catch (err) {
       this.logHttpError(url, err);
       if (err instanceof ServiceUnavailableException) throw err;

@@ -330,6 +330,50 @@ me(@ActiveUser() user: IUserWithoutPassword) {
 }
 ```
 
+#### `@CurrentScope(opts?)`
+
+Param decorator that returns the `scope[]` array for a specific `(feature, action)` permission of the current user. Pairs with `@RequirePermission` to drive **row-level filtering** at the service layer (e.g. "admin sees all rows, viewer sees only own").
+
+**Auto-inference (recommended):** when called with no arguments, it reads the `feature`/`action` from the `@RequirePermission` decorator on the same handler:
+
+```typescript
+@Get('/:orgId/integrations')
+@RequirePermission({ feature: RoleFeatureEnum.INTEGRATIONS, action: RoleActionEnum.READ })
+async listByOrg(
+  @Param('orgId') orgId: string,
+  @CurrentScope() scope: RoleScopeEnum[],
+  @ActiveUser() user: IUserWithoutPassword,
+) {
+  const seesAll = hasFullAccess(scope);
+  return this.integrationService.listByOrg(orgId, {
+    filterByUserId: seesAll ? undefined : user.id,
+    includeCreatedBy: seesAll,
+  });
+}
+```
+
+**Explicit override:** if you need a scope for a permission that's *not* the one declared in `@RequirePermission` (e.g. checking a secondary permission inline):
+
+```typescript
+@CurrentScope({ feature: RoleFeatureEnum.AGENTS, action: RoleActionEnum.READ })
+agentsScope: RoleScopeEnum[],
+```
+
+Returns `[]` when the user doesn't have the permission or when neither auto-inference nor explicit options yield a `(feature, action)` pair. Use it together with the helpers below.
+
+### Scope helpers
+
+Plain functions (not NestJS providers) for reasoning about the scope array. Import and use them directly inside your services or controllers.
+
+```typescript
+import { hasFullAccess, canAccessOnlyOwn } from '@briansleonel/cs-permissions-sdk';
+
+hasFullAccess(scope);     // true if scope includes RoleScopeEnum.ALL
+canAccessOnlyOwn(scope);  // true if scope includes OWN but NOT ALL
+```
+
+Both accept `RoleScopeEnum[] | null | undefined` and return a `boolean`, so they are safe to call on raw `scope` values without nullish-check boilerplate.
+
 ### Enums
 
 #### `RoleFeatureEnum`
@@ -581,7 +625,8 @@ The SDK follows SemVer. Breaking changes to the public API (guards, decorators, 
 
 | Version | Notes |
 |---|---|
-| `1.1.x` | Two-tier Redis cache (`org-roles:*` + `role:*:permissions`). `jwtSecret` deprecated. |
+| `2.1.x` | `@CurrentScope()` decorator + `hasFullAccess` / `canAccessOnlyOwn` helpers for row-level filtering at the service layer. |
+| `2.0.x` | Two-tier Redis cache (`org-roles:*` + `role:*:permissions`). Removed `OrganizationTokenService`. `jwtSecret` deprecated. |
 | `1.0.x` | JWT-based cache. Required `jwtSecret`. Single gateway endpoint `/api/auth/internal/permissions-token`. |
 
 ---

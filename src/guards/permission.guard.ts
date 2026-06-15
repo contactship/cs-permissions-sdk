@@ -16,6 +16,12 @@ export class PermissionGuard implements CanActivate {
   constructor(private reflector: Reflector) {}
 
   canActivate(context: ExecutionContext): boolean {
+    const request = context.switchToHttp().getRequest<IRequestWithUser>();
+
+    if (request.skip_permissions_check === true) {
+      return true;
+    }
+
     const requiredPermission =
       this.reflector.getAllAndOverride<IRequiredPermission>(PERMISSION_KEY, [
         context.getHandler(),
@@ -24,7 +30,6 @@ export class PermissionGuard implements CanActivate {
 
     if (!requiredPermission) return true;
 
-    const request = context.switchToHttp().getRequest<IRequestWithUser>();
     const org = request.org_user_permissions as IRolePayload;
 
     const permissions = org?.permissions || [];

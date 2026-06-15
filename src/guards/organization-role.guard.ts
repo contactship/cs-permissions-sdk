@@ -20,6 +20,10 @@ export class OrganizationRoleGuard implements CanActivate {
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest<IRequestWithUser>();
 
+    if (request.skip_permissions_check === true) {
+      return true;
+    }
+
     const organizationId = request.headers[ORG_ID_HEADER] as string | undefined;
     const user = request.user;
 

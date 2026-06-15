@@ -239,6 +239,8 @@ The shape of each permission must conform to [`IPermissionPayload`](#ipermission
 
 The SDK exposes two guards that are designed to run together, in this exact order:
 
+> **⚠️ The guards must be applied with `@UseGuards(...)`.** The `@RequirePermission` decorator alone does **not** enforce anything — it only attaches metadata. The actual enforcement and the population of `request.org_user_permissions` happens inside `OrganizationRoleGuard` + `PermissionGuard`. Forgetting `@UseGuards` is the most common mistake when integrating the SDK: the endpoint will run anyway, `request.org_user_permissions` will be `undefined`, and `@CurrentScope()` will return `[]`. If you want a global setup so you don't have to repeat `@UseGuards` per controller, see [Global guards](#global-guards).
+
 ```typescript
 import {
   OrganizationRoleGuard,
@@ -250,7 +252,7 @@ import {
 } from '@briansleonel/cs-permissions-sdk';
 
 @Controller('contacts')
-@UseGuards(OrganizationRoleGuard, PermissionGuard)
+@UseGuards(OrganizationRoleGuard, PermissionGuard)   // 👈 required — without this nothing is enforced
 @ApiHeader({ name: ORG_ID_HEADER, required: true, description: 'Organization id' })
 export class ContactController {
   @Post()
@@ -266,6 +268,84 @@ export class ContactController {
 **Order matters:** `OrganizationRoleGuard` must run before `PermissionGuard`, because the latter depends on `request.org_user_permissions` set by the former.
 
 The frontend only needs to send the `x-organization-id` header — the SDK does everything else.
+
+### Global guards
+
+If you want every endpoint in your service protected automatically — without having to add `@UseGuards(OrganizationRoleGuard, PermissionGuard)` on every controller — register them globally in `AppModule`:
+
+```typescript
+import { APP_GUARD } from '@nestjs/core';
+
+@Module({
+  providers: [
+    { provide: APP_GUARD, useClass: OrganizationRoleGuard },
+    { provide: APP_GUARD, useClass: PermissionGuard },
+  ],
+})
+export class AppModule {}
+```
+
+**Trade-off:** with global guards, the SDK runs on **every** route — including ones that should stay public (login, health, webhooks, etc.). You'd typically pair this with a `@Public()` skip decorator and a check inside the guards. For most services starting out, `@UseGuards` per controller is more explicit and easier to reason about — switch to global only when the repetition becomes noticeable.
+
+### Bypassing the guards via a request flag
+
+When a service has **multiple authentication methods** — typically a user bearer token *plus* an org-level api-key — the api-key path has no user attached and therefore no role/permissions to evaluate. The SDK supports this by short-circuiting both guards when an upstream guard sets `request.skip_permissions_check = true`.
+
+The contract is intentionally simple: **the SDK does not know about your auth methods**. Your `AuthGuard` decides whether the current request should bypass and sets the flag; the SDK guards read it and return `true` immediately.
+
+```typescript
+// your service: src/guards/auth.guard.ts
+import { CanActivate, ExecutionContext, Injectable, UnauthorizedException } from '@nestjs/common';
+import { IRequestWithUser } from '@briansleonel/cs-permissions-sdk';
+
+@Injectable()
+export class AuthGuard implements CanActivate {
+  async canActivate(context: ExecutionContext): Promise<boolean> {
+    const request = context.switchToHttp().getRequest<IRequestWithUser>();
+    const apiKey  = request.headers['x-api-key'] as string | undefined;
+    const bearer  = this.extractBearer(request.headers.authorization);
+
+    if (apiKey) {
+      const org = await this.validateApiKey(apiKey);
+      if (!org) throw new UnauthorizedException('Invalid API key');
+      request.skip_permissions_check = true;     // 👈 SDK guards will return true
+      request.organization_id = org.id;
+      return true;
+    }
+
+    if (bearer) {
+      const user = await this.validateBearer(bearer);
+      if (!user) throw new UnauthorizedException('Invalid token');
+      request.user = user;                     // SDK guards will resolve permissions
+      return true;
+    }
+
+    throw new UnauthorizedException('No credentials provided');
+  }
+}
+```
+
+Chain the guards in this order — your `AuthGuard` first, then the SDK guards:
+
+```typescript
+@UseGuards(AuthGuard, OrganizationRoleGuard, PermissionGuard)
+@RequirePermission({ feature: RoleFeatureEnum.MESSAGES, action: RoleActionEnum.READ })
+@Get(':threadId/timeline')
+async getTimeline(...) { /* ... */ }
+```
+
+**What happens at runtime**
+
+| Auth method | After `AuthGuard` | Inside `OrganizationRoleGuard` | Inside `PermissionGuard` |
+|---|---|---|---|
+| Bearer (user) | `request.user` set | Resolves role + permissions, populates `request.org_user_permissions` | Matches required permission |
+| Api-key (org) | `request.skip_permissions_check = true` | Returns `true` immediately, no Redis/gateway calls | Returns `true` immediately |
+
+> **Heads-up for the handler.** When the request was authenticated via api-key, `request.org_user_permissions` will be `undefined` inside the controller. If your handler reads `req.org_user_permissions?.permissions`, you need to handle that case explicitly — typically by treating api-key requests as if they had full scope (`scope: [ALL]`) or by returning an org-wide projection. This is intentional: an org-level api-key has no per-user role to derive scope from.
+
+**Why a request flag instead of a config predicate?**
+
+Putting the bypass logic in your `AuthGuard` (where authentication decisions belong) keeps the SDK agnostic of your auth implementation. If you add a new auth method later (`x-service-token`, mTLS, etc.), you only touch the `AuthGuard` — no SDK config change, no controller change.
 
 ### Reading the resolved payload from the request
 
@@ -334,21 +414,28 @@ me(@ActiveUser() user: IUserWithoutPassword) {
 
 Param decorator that returns the `scope[]` array for a specific `(feature, action)` permission of the current user. Pairs with `@RequirePermission` to drive **row-level filtering** at the service layer (e.g. "admin sees all rows, viewer sees only own").
 
+> **⚠️ Requires the guards to be applied.** `@CurrentScope()` reads from `request.org_user_permissions`, which is populated by `OrganizationRoleGuard`. You **must** apply `@UseGuards(OrganizationRoleGuard, PermissionGuard)` at the controller or method level (or register them globally — see [Global guards](#global-guards)). Without that, `@CurrentScope()` returns `[]` because `request.org_user_permissions` is `undefined`. The `@RequirePermission` decorator alone is just metadata — it does not enforce anything by itself.
+
 **Auto-inference (recommended):** when called with no arguments, it reads the `feature`/`action` from the `@RequirePermission` decorator on the same handler:
 
 ```typescript
-@Get('/:orgId/integrations')
-@RequirePermission({ feature: RoleFeatureEnum.INTEGRATIONS, action: RoleActionEnum.READ })
-async listByOrg(
-  @Param('orgId') orgId: string,
-  @CurrentScope() scope: RoleScopeEnum[],
-  @ActiveUser() user: IUserWithoutPassword,
-) {
-  const seesAll = hasFullAccess(scope);
-  return this.integrationService.listByOrg(orgId, {
-    filterByUserId: seesAll ? undefined : user.id,
-    includeCreatedBy: seesAll,
-  });
+@Controller()
+@UseGuards(OrganizationRoleGuard, PermissionGuard)   // 👈 required
+export class IntegrationController {
+
+  @Get('/:orgId/integrations')
+  @RequirePermission({ feature: RoleFeatureEnum.INTEGRATIONS, action: RoleActionEnum.READ })
+  async listByOrg(
+    @Param('orgId') orgId: string,
+    @CurrentScope() scope: RoleScopeEnum[],
+    @ActiveUser() user: IUserWithoutPassword,
+  ) {
+    const seesAll = hasFullAccess(scope);
+    return this.integrationService.listByOrg(orgId, {
+      filterByUserId: seesAll ? undefined : user.id,
+      includeCreatedBy: seesAll,
+    });
+  }
 }
 ```
 
@@ -359,7 +446,7 @@ async listByOrg(
 agentsScope: RoleScopeEnum[],
 ```
 
-Returns `[]` when the user doesn't have the permission or when neither auto-inference nor explicit options yield a `(feature, action)` pair. Use it together with the helpers below.
+Returns `[]` when the user doesn't have the permission, when the guards weren't applied, or when neither auto-inference nor explicit options yield a `(feature, action)` pair. Use it together with the helpers below.
 
 ### Scope helpers
 
@@ -603,6 +690,7 @@ useFactory: (config) => ({
 | `UnauthorizedException: Resolved permissions do not match request context` | Gateway returned a `user_role` that doesn't match the requested `(orgId, userId)`. Likely a bug in the gateway. |
 | `ServiceUnavailableException: Failed to fetch user role from gateway` | Gateway is down, unreachable, returning non-2xx, or the user does not belong to the organization. Check `GATEWAY_URL` and gateway logs (the SDK logs URL, status, and response body). |
 | `ServiceUnavailableException: Failed to fetch role permissions from gateway` | Same as above, but for the permissions endpoint. Check that `roleId` is valid in the gateway. |
+| Endpoint runs but `request.org_user_permissions` is `undefined`, `@CurrentScope()` returns `[]` | Either (a) the guards are not applied — add `@UseGuards(OrganizationRoleGuard, PermissionGuard)` at the controller or method level, or register them globally with `APP_GUARD` (see [Global guards](#global-guards)); or (b) the request was authenticated via api-key and your `AuthGuard` set `request.skip_permissions_check = true` — in that case the absence of `org_user_permissions` is expected (see [Bypassing the guards via a request flag](#bypassing-the-guards-via-a-request-flag)). |
 | Permission changes don't take effect | Cache key was not invalidated. Verify the gateway `DEL`s `role:{roleId}:permissions` after mutations. |
 | Role reassignment doesn't take effect | Verify the gateway `DEL`s `org-roles:{orgId}:user:{userId}` after the change. Otherwise wait up to 1 hour for the TTL to expire. |
 | Redis errors at boot (`ECONNREFUSED`) | Wrong `REDIS_URL`, or Redis is not running. |
@@ -625,7 +713,7 @@ The SDK follows SemVer. Breaking changes to the public API (guards, decorators, 
 
 | Version | Notes |
 |---|---|
-| `2.1.x` | `@CurrentScope()` decorator + `hasFullAccess` / `canAccessOnlyOwn` helpers for row-level filtering at the service layer. |
+| `2.1.x` | `@CurrentScope()` decorator + `hasFullAccess` / `canAccessOnlyOwn` helpers for row-level filtering at the service layer. Added `request.skip_permissions_check` flag for bypassing guards when the request is authenticated via a non-user method (e.g. api-key). |
 | `2.0.x` | Two-tier Redis cache (`org-roles:*` + `role:*:permissions`). Removed `OrganizationTokenService`. `jwtSecret` deprecated. |
 | `1.0.x` | JWT-based cache. Required `jwtSecret`. Single gateway endpoint `/api/auth/internal/permissions-token`. |
 

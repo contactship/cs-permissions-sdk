@@ -8,6 +8,7 @@
     "dist"
   ],
   "scripts": {
+    "prebuild": "node -e \"require('fs').rmSync('dist', { recursive: true, force: true })\"",
     "build": "tsc -p tsconfig.build.json",
     "prepublishOnly": "npm run build"
   },

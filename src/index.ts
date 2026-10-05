@@ -18,6 +18,7 @@ export * from "./decorators/require-permission.decorator";
 export * from "./decorators/active-user.decorator";
 export * from "./decorators/current-scope.decorator";
 export * from "./utils/scope.helpers";
+export * from "./utils/permission-cache.helpers";
 export * from "./guards/organization-role.guard";
 export * from "./guards/permission.guard";
 export * from "./services/gateway-permissions.client";

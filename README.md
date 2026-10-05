@@ -21,6 +21,7 @@ The consuming service never queries the auth/role database directly. It only:
 - [Caching strategy](#caching-strategy)
 - [Cache invalidation](#cache-invalidation)
 - [Injection tokens](#injection-tokens)
+- [Migration from 2.x](#migration-from-2x)
 - [Migration from 1.0.x](#migration-from-10x)
 - [Troubleshooting](#troubleshooting)
 
@@ -43,13 +44,13 @@ The consuming service never queries the auth/role database directly. It only:
                                     │  │        │                            │     │
                                     │  │        ├─► Redis GET                │     │
                                     │  │        │   org-roles:{org}:user:{u} │     │
-                                    │  │        │   (TTL 1h)                 │     │
+                                    │  │        │   (TTL cacheTtlSeconds)    │     │
                                     │  │        │   miss → POST gateway      │─────┼──► /api/roles/internal/user-role
                                     │  │        │                            │     │
                                     │  │        └─► Redis GET                │     │
                                     │  │            role:{roleId}:permissions│     │
-                                    │  │            (TTL 24h)                │     │
-                                    │  │            miss → GET gateway       │─────┼──► /api/roles/internal/permissions/:roleId
+                                    │  │            (TTL cacheTtlSeconds)    │     │
+                                    │  │            miss → POST gateway      │─────┼──► /api/roles/internal/permissions/:roleId
                                     │  └─────────────────────────────────────┘     │
                                     │                  │                           │
                                     │                  ▼                           │
@@ -68,13 +69,13 @@ The consuming service never queries the auth/role database directly. It only:
 
 | Layer | Owns |
 |---|---|
-| Gateway (external) | Database access, role/permission computation, cache invalidation on mutations |
-| SDK | Two-tier Redis cache, header parsing, request enrichment, permission matching |
-| Consumer service | Business logic, controllers, declaring required permissions |
+| Gateway (external) | Database access, role/permission computation |
+| SDK | Two-tier Redis cache with a mandatory TTL, header parsing, request enrichment, permission matching |
+| Consumer service | Business logic, controllers, declaring required permissions, invalidating its own copy when it mutates roles |
 
-The SDK **never** touches the auth/roles database. All resolution is delegated to the gateway over HTTP, and results are cached in Redis to avoid hitting the gateway on every request.
+The SDK **never** touches the auth/roles database. All resolution is delegated to the gateway over HTTP, and results are cached in the consumer's own Redis, with an expiry, to avoid hitting the gateway on every request.
 
-> **Why two cache keys instead of a single JWT?** Granular invalidation. When a role's permissions change, the gateway just `DEL`s `role:{roleId}:permissions` and **all users with that role** see the change immediately on their next request — no per-user token reissue, no JWT decode cost on every request.
+> **Why two cache keys instead of a single JWT?** Granular invalidation. When a role's permissions change, deleting `role:{roleId}:permissions` makes **all users with that role** see the change on their next request — no per-user token reissue, no JWT decode cost on every request.
 
 ---
 
@@ -112,11 +113,14 @@ The SDK is registered **once** in your `AppModule` via `forRoot` or `forRootAsyn
 
 ```typescript
 interface CsPermissionsSdkOptions {
-  redisUrl: string;    // ioredis connection string, e.g. redis://localhost:6379
-  gatewayUrl: string;  // base URL of the gateway service (no trailing slash needed)
-  jwtSecret?: string;  // @deprecated — kept for backwards compatibility, no longer used
+  redisUrl: string;         // ioredis connection string, e.g. redis://localhost:6379
+  gatewayUrl: string;       // base URL of the gateway service (no trailing slash needed)
+  cacheTtlSeconds: number;  // required — seconds each cached role / permission set lives, 1 to 300
+  jwtSecret?: string;       // @deprecated — kept for backwards compatibility, no longer used
 }
 ```
+
+`cacheTtlSeconds` is the longest a change takes to reach your service when nobody invalidates it (a seed, a manual fix in the database, a lost notification). It has no default on purpose, and the module refuses to boot when it is missing, is not a whole number, or is outside `1..MAX_PERMISSION_CACHE_TTL_SECONDS` (300). The cap catches milliseconds passed by mistake. `60` is a sensible value. If you read it from an env var, parse it: a string is rejected too.
 
 ### Async (recommended)
 
@@ -131,8 +135,9 @@ import { CsPermissionsSdkModule } from '@briansleonel/cs-permissions-sdk';
     CsPermissionsSdkModule.forRootAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({
-        redisUrl:   config.get<string>('REDIS_URL') ?? '',
-        gatewayUrl: config.get<string>('GATEWAY_URL') ?? '',
+        redisUrl:        config.get<string>('REDIS_URL') ?? '',
+        gatewayUrl:      config.get<string>('GATEWAY_URL') ?? '',
+        cacheTtlSeconds: 60,
       }),
     }),
   ],
@@ -144,8 +149,9 @@ export class AppModule {}
 
 ```typescript
 CsPermissionsSdkModule.forRoot({
-  redisUrl:   'redis://localhost:6379',
-  gatewayUrl: 'https://gateway.internal',
+  redisUrl:        'redis://localhost:6379',
+  gatewayUrl:      'https://gateway.internal',
+  cacheTtlSeconds: 60,
 }),
 ```
 
@@ -209,25 +215,31 @@ Or wrapped:
 }
 ```
 
-#### `GET {gatewayUrl}/api/roles/internal/permissions/:roleId`
+#### `POST {gatewayUrl}/api/roles/internal/permissions/:roleId`
 
-Returns the array of permissions for the given role.
+Returns the permissions for the given role.
 
 Response body:
 ```json
-[
-  { "feature": "contacts", "action": "read",   "scope": null },
-  { "feature": "contacts", "action": "create", "scope": ["all"] }
-]
+{
+  "role_id": "uuid",
+  "permissions": [
+    { "feature": "contacts", "action": "read",   "scope": null },
+    { "feature": "contacts", "action": "create", "scope": ["all"] }
+  ]
+}
 ```
 
 Or wrapped:
 ```json
 {
   "statusCode": 200,
-  "data": [
-    { "feature": "contacts", "action": "read", "scope": null }
-  ]
+  "data": {
+    "role_id": "uuid",
+    "permissions": [
+      { "feature": "contacts", "action": "read", "scope": null }
+    ]
+  }
 }
 ```
 
@@ -379,7 +391,7 @@ Reads the `x-organization-id` header and the authenticated `request.user.id`, th
 Throws `UnauthorizedException` if:
 - the header is missing,
 - `request.user` is missing,
-- the gateway is unreachable,
+- the gateway is unreachable and this service has no valid copy in its cache,
 - the resolved payload doesn't match the request context.
 
 #### `PermissionGuard`
@@ -574,13 +586,19 @@ These services are exported in case you need to use them outside the guards (cus
 
 ```typescript
 resolvePermissions(organizationId: string, userId: string): Promise<IRolePayload>
+invalidateRole(roleId: string): Promise<void>
+invalidateUserRole(organizationId: string, userId: string): Promise<void>
 ```
 
-Resolves the role payload by combining the two-tier cache:
+`resolvePermissions` resolves the role payload by combining the two-tier cache:
 
-1. `org-roles:{orgId}:user:{userId}` → fetched once per hour, contains `{ user_id, organization_id, role_id }`.
-2. `role:{roleId}:permissions` → fetched on demand, contains the array of permissions for that role.
+1. `org-roles:{orgId}:user:{userId}` → contains `{ user_id, organization_id, role_id }`.
+2. `role:{roleId}:permissions` → contains the array of permissions for that role.
 3. Combines both into an `IRolePayload` and returns it.
+
+Each key is fetched from the gateway on a miss and stored for `cacheTtlSeconds`.
+
+`invalidateRole` and `invalidateUserRole` delete this service's copy of a key, so the next request reads it from the gateway. See [Cache invalidation](#cache-invalidation).
 
 ### `GatewayPermissionsClient`
 
@@ -597,47 +615,56 @@ Performs the actual HTTP calls to the gateway. Auto-unwraps `{ statusCode, data 
 
 | Key | Value | TTL | Refreshed when |
 |---|---|---|---|
-| `org-roles:{orgId}:user:{userId}` | `IUserRole` JSON | 1 hour | Cache miss or gateway `DEL` |
-| `role:{roleId}:permissions` | `IPermissionPayload[]` JSON | 24 hours | Cache miss or gateway `DEL` |
+| `org-roles:{orgId}:user:{userId}` | `IUserRole` JSON | `cacheTtlSeconds` | Expiry, cache miss or `invalidateUserRole` |
+| `role:{roleId}:permissions` | `IPermissionPayload[]` JSON | `cacheTtlSeconds` | Expiry, cache miss or `invalidateRole` |
+
+Use `buildUserRoleCacheKey` and `buildRolePermissionsCacheKey` instead of writing the key format by hand.
 
 Properties of this design:
 
+- **Each service keeps its own copy.** The SDK writes to the Redis passed in `redisUrl`. No other service needs to share it, and nothing outside the SDK needs to write these keys.
+- **Correctness never depends on an invalidation arriving.** Every copy expires within `cacheTtlSeconds`, so a change made where nobody invalidates — a seed, a manual fix, a lost notification — reaches the service within that time.
+- **Copies the SDK did not write are not trusted blindly.** A key with no expiry, or with an expiry longer than `cacheTtlSeconds`, is read as a miss. It is then rewritten with the SDK's TTL. This retires copies left behind by older writers on their first read.
+- **A failed write does not deny the request.** The permissions were already resolved by the gateway, so the SDK logs the error and carries on.
 - **No JWT verification on every request.** The previous design encoded `IRolePayload` as a JWT and re-verified the signature on every call. Now it's plain JSON in Redis — faster, simpler, no shared secret needed at runtime.
-- **Granular invalidation.** When a role's permissions change, the gateway invalidates one key (`role:{roleId}:permissions`) and **every user holding that role** sees the change on their next request.
-- **TTLs are a safety net.** The 1h on `org-roles:...` covers the case where a user's role is reassigned. The 24h on `role:...:permissions` covers the case where an explicit invalidation is missed.
 
 ---
 
 ## Cache invalidation
 
-The gateway is the source of truth, so it must `DEL` the affected keys whenever data changes. Recommended hooks:
+Invalidation is the fast path; the TTL is what guarantees correctness. The service that writes the data deletes its own copy right after the write, then tells the other services. If that notification is lost, the other copies still expire within `cacheTtlSeconds`.
 
-| Mutation on the gateway | Keys to delete |
+| Mutation | Call |
 |---|---|
-| Permissions of a role change | `role:{roleId}:permissions` |
-| A role is deleted | `role:{roleId}:permissions` (and force re-fetch of all users using it) |
-| User is reassigned to a different role in an organization | `org-roles:{orgId}:user:{userId}` |
-| User is removed from an organization | `org-roles:{orgId}:user:{userId}` |
+| Permissions of a role change | `invalidateRole(roleId)` |
+| A role is deleted | `invalidateRole(roleId)` |
+| User is reassigned to a different role in an organization | `invalidateUserRole(orgId, userId)` |
+| User is removed from an organization | `invalidateUserRole(orgId, userId)` |
 | User is added to a new organization | _(no action needed — first request will populate)_ |
 
 ```typescript
-// gateway side, after mutating role permissions
-await this.redisService.del(`role:${roleId}:permissions`);
+constructor(private readonly permissions: OrganizationPermissionsService) {}
+
+// after mutating role permissions
+await this.permissions.invalidateRole(roleId);
 
 // after mutating user-organization membership
-await this.redisService.del(`org-roles:${organizationId}:user:${userId}`);
+await this.permissions.invalidateUserRole(organizationId, userId);
 ```
+
+Both methods only delete the copy in **this** service's Redis, and they reject if Redis fails. The caller decides whether that should fail the mutation.
 
 ---
 
 ## Injection tokens
 
-The SDK exports three injection tokens. **You typically don't need any of these** — they are public so the DI graph is debuggable and so advanced consumers can override providers if needed.
+The SDK exports four injection tokens. **You typically don't need any of these** — they are public so the DI graph is debuggable and so advanced consumers can override providers if needed.
 
 | Token | Resolves to | Notes |
 |---|---|---|
 | `CS_PERMISSIONS_SDK_OPTIONS` | `CsPermissionsSdkOptions` | The full options object as produced by your `useFactory`. Single source of truth. |
 | `PERMISSION_GATEWAY_URL_TOKEN` | `string` | Derived from `options.gatewayUrl`. |
+| `PERMISSION_CACHE_TTL_TOKEN` | `number` | Derived from `options.cacheTtlSeconds`, validated at boot. Useful to give your own copies of the same data the same TTL. |
 | `PERMISSION_JWT_SECRET_TOKEN` | `string` | _Deprecated._ Resolves to `options.jwtSecret ?? ''`. Kept for backwards compatibility. |
 
 ### Why `CS_PERMISSIONS_SDK_OPTIONS` exists
@@ -645,6 +672,34 @@ The SDK exports three injection tokens. **You typically don't need any of these*
 If `forRootAsync` registered every derived provider with its own copy of `useFactory`, NestJS would invoke that factory once per provider. Centralizing the result in `CS_PERMISSIONS_SDK_OPTIONS` ensures the factory runs **once**, and the rest of the providers read from that single value.
 
 ---
+
+## Migration from 2.x
+
+`3.0.0` makes `cacheTtlSeconds` a required option. That is the only breaking change: the guards, decorators, keys and request payload are the same.
+
+```typescript
+useFactory: (config) => ({
+  redisUrl:        config.get('REDIS_URL') ?? '',
+  gatewayUrl:      config.get('GATEWAY_URL') ?? '',
+  cacheTtlSeconds: 60, // new, required
+}),
+```
+
+What changes at runtime:
+
+- **The SDK now caches.** In `2.x` both writes were commented out. Every request missed the cache and called the gateway twice, unless some other service had written the keys into the same Redis. From `3.0.0` the SDK writes both keys with `cacheTtlSeconds`.
+- **Keys with no expiry stop being served.** These are copies left by earlier writers that never expire. Each one is refetched and rewritten with the TTL the first time it is read. A key nobody reads again, such as one for a deleted role, stays until it is removed by hand:
+
+  ```bash
+  # add your connection flags to each redis-cli, e.g. redis-cli -u "$REDIS_URL"
+  for pattern in 'role:*:permissions' 'org-roles:*'; do
+    redis-cli --scan --pattern "$pattern" | while read -r key; do
+      [ "$(redis-cli ttl "$key")" = "-1" ] && redis-cli del "$key"
+    done
+  done
+  ```
+
+- **Mutations can invalidate locally.** Services that change roles or memberships should call `invalidateRole` / `invalidateUserRole` (see [Cache invalidation](#cache-invalidation)).
 
 ## Migration from 1.0.x
 
@@ -691,19 +746,28 @@ useFactory: (config) => ({
 | `ServiceUnavailableException: Failed to fetch user role from gateway` | Gateway is down, unreachable, returning non-2xx, or the user does not belong to the organization. Check `GATEWAY_URL` and gateway logs (the SDK logs URL, status, and response body). |
 | `ServiceUnavailableException: Failed to fetch role permissions from gateway` | Same as above, but for the permissions endpoint. Check that `roleId` is valid in the gateway. |
 | Endpoint runs but `request.org_user_permissions` is `undefined`, `@CurrentScope()` returns `[]` | Either (a) the guards are not applied — add `@UseGuards(OrganizationRoleGuard, PermissionGuard)` at the controller or method level, or register them globally with `APP_GUARD` (see [Global guards](#global-guards)); or (b) the request was authenticated via api-key and your `AuthGuard` set `request.skip_permissions_check = true` — in that case the absence of `org_user_permissions` is expected (see [Bypassing the guards via a request flag](#bypassing-the-guards-via-a-request-flag)). |
-| Permission changes don't take effect | Cache key was not invalidated. Verify the gateway `DEL`s `role:{roleId}:permissions` after mutations. |
-| Role reassignment doesn't take effect | Verify the gateway `DEL`s `org-roles:{orgId}:user:{userId}` after the change. Otherwise wait up to 1 hour for the TTL to expire. |
+| Permission changes take up to `cacheTtlSeconds` to apply | Expected when the service that made the change did not call `invalidateRole(roleId)`, or when the change was made in another service: each service only drops its own copy. |
+| Role reassignment takes up to `cacheTtlSeconds` to apply | Same as above, with `invalidateUserRole(orgId, userId)`. |
+| `Error: CsPermissionsSdkModule: cacheTtlSeconds must be a whole number of seconds between 1 and 300` at boot | The option is missing, is a string (parse env vars with `Number(...)`), is not an integer, or is out of range — `60000` means milliseconds were passed. |
+| `Ignoring <key>: it never expires, fetching it again` warning | A copy written without an expiry was found and replaced. Expected once per key after upgrading to `3.0.0`. |
 | Redis errors at boot (`ECONNREFUSED`) | Wrong `REDIS_URL`, or Redis is not running. |
 
-### Manual cache invalidation (gateway side)
+### Manual cache invalidation
 
 ```typescript
+import {
+  buildRolePermissionsCacheKey,
+  buildUserRoleCacheKey,
+} from '@briansleonel/cs-permissions-sdk';
+
 // invalidate a role's permissions for everyone using it
-await redis.del(`role:${roleId}:permissions`);
+await redis.del(buildRolePermissionsCacheKey(roleId));
 
 // invalidate a single user's role membership
-await redis.del(`org-roles:${organizationId}:user:${userId}`);
+await redis.del(buildUserRoleCacheKey(organizationId, userId));
 ```
+
+Run these against the Redis of each service holding a copy. Without them, every copy still expires within `cacheTtlSeconds`.
 
 ---
 
@@ -713,7 +777,8 @@ The SDK follows SemVer. Breaking changes to the public API (guards, decorators, 
 
 | Version | Notes |
 |---|---|
-| `2.1.x` | `@CurrentScope()` decorator + `hasFullAccess` / `canAccessOnlyOwn` helpers for row-level filtering at the service layer. Added `request.skip_permissions_check` flag for bypassing guards when the request is authenticated via a non-user method (e.g. api-key). |
+| `3.0.x` | The SDK writes both cache keys with a required `cacheTtlSeconds`. Keys with no expiry, or with a longer one, are refetched. Adds `invalidateRole` / `invalidateUserRole`, the key builders and `PERMISSION_CACHE_TTL_TOKEN`. |
+| `2.0.2` – `2.0.3` | `@CurrentScope()` decorator + `hasFullAccess` / `canAccessOnlyOwn` helpers for row-level filtering at the service layer. Added `request.skip_permissions_check` flag for bypassing guards when the request is authenticated via a non-user method (e.g. api-key). |
 | `2.0.x` | Two-tier Redis cache (`org-roles:*` + `role:*:permissions`). Removed `OrganizationTokenService`. `jwtSecret` deprecated. |
 | `1.0.x` | JWT-based cache. Required `jwtSecret`. Single gateway endpoint `/api/auth/internal/permissions-token`. |
 

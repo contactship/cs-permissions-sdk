@@ -4,6 +4,7 @@ import { DynamicModule, Global, Module, Provider } from "@nestjs/common";
 import { JwtModule } from "@nestjs/jwt";
 import {
   CS_PERMISSIONS_SDK_OPTIONS,
+  PERMISSION_CACHE_TTL_TOKEN,
   PERMISSION_GATEWAY_URL_TOKEN,
   PERMISSION_JWT_SECRET_TOKEN,
 } from "./constants/sdk-tokens.constant";
@@ -11,10 +12,19 @@ import { OrganizationRoleGuard } from "./guards/organization-role.guard";
 import { PermissionGuard } from "./guards/permission.guard";
 import { GatewayPermissionsClient } from "./services/gateway-permissions.client";
 import { OrganizationPermissionsService } from "./services/organization-permissions.service";
+import { MAX_PERMISSION_CACHE_TTL_SECONDS } from "./utils/permission-cache.helpers";
 
 export interface CsPermissionsSdkOptions {
   redisUrl: string;
   gatewayUrl: string;
+  /**
+   * Seconds each cached user role and role permission set lives in this
+   * service's Redis: the longest a change takes to reach this service when
+   * nobody invalidates it (a seed, a manual fix, a lost notification).
+   * Required on purpose, because a copy without an expiry is served forever.
+   * A whole number between 1 and `MAX_PERMISSION_CACHE_TTL_SECONDS`.
+   */
+  cacheTtlSeconds: number;
   /**
    * @deprecated No longer used by the SDK after v1.1.0. Permissions are now
    * resolved from a granular Redis cache instead of a JWT. The option is kept
@@ -66,6 +76,7 @@ export class CsPermissionsSdkModule {
         GatewayPermissionsClient,
         PERMISSION_JWT_SECRET_TOKEN,
         PERMISSION_GATEWAY_URL_TOKEN,
+        PERMISSION_CACHE_TTL_TOKEN,
         JwtModule,
       ],
     };
@@ -117,6 +128,7 @@ export class CsPermissionsSdkModule {
         GatewayPermissionsClient,
         PERMISSION_JWT_SECRET_TOKEN,
         PERMISSION_GATEWAY_URL_TOKEN,
+        PERMISSION_CACHE_TTL_TOKEN,
         JwtModule,
       ],
     };
@@ -134,6 +146,33 @@ export class CsPermissionsSdkModule {
         useFactory: (opts: CsPermissionsSdkOptions) => opts.gatewayUrl,
         inject: [CS_PERMISSIONS_SDK_OPTIONS],
       },
+      {
+        provide: PERMISSION_CACHE_TTL_TOKEN,
+        useFactory: (opts: CsPermissionsSdkOptions) =>
+          assertCacheTtlSeconds(opts.cacheTtlSeconds),
+        inject: [CS_PERMISSIONS_SDK_OPTIONS],
+      },
     ];
   }
+}
+
+/**
+ * Runs while the app boots, so a missing or wrong TTL stops the service there
+ * instead of caching permissions with no expiry. Options built from env vars
+ * reach here as strings unless the consumer parses them, hence the type check.
+ */
+function assertCacheTtlSeconds(value: unknown): number {
+  if (
+    typeof value !== "number" ||
+    !Number.isInteger(value) ||
+    value < 1 ||
+    value > MAX_PERMISSION_CACHE_TTL_SECONDS
+  ) {
+    const received = typeof value === "string" ? `"${value}"` : String(value);
+    throw new Error(
+      `CsPermissionsSdkModule: cacheTtlSeconds must be a whole number of seconds between 1 and ${MAX_PERMISSION_CACHE_TTL_SECONDS}, received ${received}`,
+    );
+  }
+
+  return value;
 }

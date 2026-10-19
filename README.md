@@ -1,4 +1,4 @@
-# @briansleonel/cs-permissions-sdk
+# @contactship/cs-permissions-sdk
 
 NestJS SDK that centralizes **organization-scoped role-based access control (RBAC)** for a microservices ecosystem. It transparently handles Redis caching and remote permission resolution against a central gateway, exposing a simple guard + decorator API to the consuming service.
 
@@ -82,7 +82,7 @@ The SDK **never** touches the auth/roles database. All resolution is delegated t
 ## Installation
 
 ```bash
-npm install @briansleonel/cs-permissions-sdk
+npm install @contactship/cs-permissions-sdk
 ```
 
 ### Peer dependencies
@@ -127,7 +127,7 @@ interface CsPermissionsSdkOptions {
 ```typescript
 import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
-import { CsPermissionsSdkModule } from '@briansleonel/cs-permissions-sdk';
+import { CsPermissionsSdkModule } from '@contactship/cs-permissions-sdk';
 
 @Module({
   imports: [
@@ -261,7 +261,7 @@ import {
   RoleFeatureEnum,
   RoleActionEnum,
   ORG_ID_HEADER,
-} from '@briansleonel/cs-permissions-sdk';
+} from '@contactship/cs-permissions-sdk';
 
 @Controller('contacts')
 @UseGuards(OrganizationRoleGuard, PermissionGuard)   // 👈 required — without this nothing is enforced
@@ -308,7 +308,7 @@ The contract is intentionally simple: **the SDK does not know about your auth me
 ```typescript
 // your service: src/guards/auth.guard.ts
 import { CanActivate, ExecutionContext, Injectable, UnauthorizedException } from '@nestjs/common';
-import { IRequestWithUser } from '@briansleonel/cs-permissions-sdk';
+import { IRequestWithUser } from '@contactship/cs-permissions-sdk';
 
 @Injectable()
 export class AuthGuard implements CanActivate {
@@ -364,7 +364,7 @@ Putting the bypass logic in your `AuthGuard` (where authentication decisions bel
 After both guards pass, the request is enriched with the resolved permissions:
 
 ```typescript
-import { IRequestWithUser } from '@briansleonel/cs-permissions-sdk';
+import { IRequestWithUser } from '@contactship/cs-permissions-sdk';
 
 @Get('me')
 whoami(@Req() req: IRequestWithUser) {
@@ -465,7 +465,7 @@ Returns `[]` when the user doesn't have the permission, when the guards weren't 
 Plain functions (not NestJS providers) for reasoning about the scope array. Import and use them directly inside your services or controllers.
 
 ```typescript
-import { hasFullAccess, canAccessOnlyOwn } from '@briansleonel/cs-permissions-sdk';
+import { hasFullAccess, canAccessOnlyOwn } from '@contactship/cs-permissions-sdk';
 
 hasFullAccess(scope);     // true if scope includes RoleScopeEnum.ALL
 canAccessOnlyOwn(scope);  // true if scope includes OWN but NOT ALL
@@ -758,7 +758,7 @@ useFactory: (config) => ({
 import {
   buildRolePermissionsCacheKey,
   buildUserRoleCacheKey,
-} from '@briansleonel/cs-permissions-sdk';
+} from '@contactship/cs-permissions-sdk';
 
 // invalidate a role's permissions for everyone using it
 await redis.del(buildRolePermissionsCacheKey(roleId));

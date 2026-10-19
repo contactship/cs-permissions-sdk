@@ -1,5 +1,5 @@
 {
-  "name": "@briansleonel/cs-permissions-sdk",
+  "name": "@contactship/cs-permissions-sdk",
   "version": "3.0.0",
   "description": "Guards, decorators and interfaces for NestJS role-based permissions",
   "author": "ContactShip <team@contactship.ai> (https://contactship.ai)",
@@ -44,5 +44,8 @@
   },
   "dependencies": {
     "lodash": "^4.17.21"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

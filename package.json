@@ -2,6 +2,12 @@
   "name": "@briansleonel/cs-permissions-sdk",
   "version": "3.0.0",
   "description": "Guards, decorators and interfaces for NestJS role-based permissions",
+  "author": "ContactShip <team@contactship.ai> (https://contactship.ai)",
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/contactship/cs-permissions-sdk.git"
+  },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [

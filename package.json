@@ -1,5 +1,5 @@
 {
-  "name": "@contactship/cs-permissions-sdk",
+  "name": "@serranomatias/cs-permissions-sdk",
   "version": "3.0.0",
   "description": "Guards, decorators and interfaces for NestJS role-based permissions",
   "author": "ContactShip <team@contactship.ai> (https://contactship.ai)",
